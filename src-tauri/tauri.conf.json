@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Meeting Notes",
+  "version": "0.1.0",
+  "identifier": "com.local.meeting-notes",
+  "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
+  "app": { "windows": [{ "title": "Meeting Notes", "width": 1280, "height": 820, "minWidth": 920, "minHeight": 640, "titleBarStyle": "Visible" }], "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; connect-src ipc: http://ipc.localhost https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'" } },
+  "plugins": { "sql": { "preload": ["sqlite:meetings.db"] } },
+  "bundle": { "active": true, "targets": ["app", "dmg"], "icon": ["icons/icon.icns", "icons/icon.png"], "category": "Productivity", "shortDescription": "Private, intelligent meeting notes", "macOS": { "minimumSystemVersion": "15.0" } }
+}
