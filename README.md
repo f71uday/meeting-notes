@@ -30,3 +30,24 @@ Choose providers and paste API tokens in Settings. Tokens are stored in macOS Ke
 Grant Screen Recording / System Audio Recording and Microphone permissions when macOS asks. Audio is uploaded to the selected transcription service after recording; the transcript is then sent to the selected notes service. Tell participants that the meeting is being recorded and obtain their consent before starting.
 
 Completed meetings, minutes, transcripts, and open action items are loaded from SQLite on the Dashboard and in their library views. Successful processing stores the transcript segments and structured minutes, then removes the raw audio recording.
+
+## GitHub releases and Homebrew
+
+Push a tag such as `v0.1.0` to build Apple Silicon and Intel DMGs and publish a GitHub release. The tag must match the app version in `src-tauri/tauri.conf.json`. The release workflow updates the [Homebrew tap](https://github.com/f71uday/homebrew-meeting-notes) when its publishing credentials are configured.
+
+Add these GitHub Actions repository secrets under **Settings → Secrets and variables → Actions**:
+
+- `HOMEBREW_TAP_TOKEN`: a fine-grained token with **Contents: read and write** access to `f71uday/homebrew-meeting-notes` only.
+- `APPLE_CERTIFICATE`: base64 encoded `.p12` Developer ID Application certificate.
+- `APPLE_CERTIFICATE_PASSWORD`: password for the exported certificate.
+- `APPLE_SIGNING_IDENTITY`: exact `Developer ID Application` identity name.
+- `KEYCHAIN_PASSWORD`: temporary CI keychain password.
+- `APPLE_ID`: Apple Developer account email.
+- `APPLE_PASSWORD`: Apple app-specific password for notarization.
+- `APPLE_TEAM_ID`: Apple Developer Team ID.
+
+The Cask is published only when all of these secrets are present, so Homebrew releases are signed and notarized for Gatekeeper. Without them, the workflow can still publish the DMGs as a GitHub release but skips the Homebrew update. After the first Cask is published, install it with:
+
+```sh
+brew install --cask f71uday/meeting-notes/meeting-notes
+```

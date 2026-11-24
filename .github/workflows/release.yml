@@ -1,0 +1,200 @@
+name: Release macOS app and Homebrew Cask
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} DMG
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+          - arch: intel
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check release tag matches app version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          APP_VERSION="$(node -p 'JSON.parse(require("fs").readFileSync("src-tauri/tauri.conf.json", "utf8")).version')"
+          if [ "$VERSION" != "$APP_VERSION" ]; then
+            echo "Tag $RELEASE_TAG does not match src-tauri/tauri.conf.json version $APP_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build signed and notarized macOS DMG when credentials are configured
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+            security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+            security default-keychain -s build.keychain
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+            security set-keychain-settings -t 3600 -u build.keychain
+            security import certificate.p12 -k build.keychain \
+              -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+            rm certificate.p12
+            security find-identity -v -p codesigning build.keychain
+          fi
+
+          rm -rf "target/${BUILD_TARGET}/release/bundle"
+          npm run tauri -- build --ci --target "$BUILD_TARGET" --bundles app,dmg
+
+      - name: Stage release DMG
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          DMG="$(find "target/${BUILD_TARGET}/release/bundle/dmg" -type f -name '*.dmg' -print -quit)"
+          if [ -z "$DMG" ]; then
+            echo "Tauri did not create a DMG" >&2
+            exit 1
+          fi
+          mkdir -p release-assets
+          cp "$DMG" "release-assets/Meeting-Notes-${VERSION}-${RELEASE_ARCH}.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.arch }}
+          path: release-assets/*.dmg
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release and Homebrew Cask
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          gh release create "$RELEASE_TAG" release-assets/*.dmg \
+            --verify-tag \
+            --title "Meeting Notes ${VERSION}" \
+            --generate-notes
+
+      - name: Check Homebrew publishing credentials
+        id: homebrew-ready
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$HOMEBREW_TAP_TOKEN" ] && [ -n "$APPLE_CERTIFICATE" ] && \
+             [ -n "$APPLE_CERTIFICATE_PASSWORD" ] && [ -n "$APPLE_SIGNING_IDENTITY" ] && \
+             [ -n "$KEYCHAIN_PASSWORD" ] && \
+             [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out Homebrew tap
+        if: steps.homebrew-ready.outputs.ready == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: f71uday/homebrew-meeting-notes
+          ref: main
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update Homebrew Cask
+        if: steps.homebrew-ready.outputs.ready == 'true'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          ARM_SHA="$(shasum -a 256 "release-assets/Meeting-Notes-${VERSION}-arm64.dmg" | awk '{print $1}')"
+          INTEL_SHA="$(shasum -a 256 "release-assets/Meeting-Notes-${VERSION}-intel.dmg" | awk '{print $1}')"
+          mkdir -p homebrew-tap/Casks
+          cat > homebrew-tap/Casks/meeting-notes.rb <<EOF
+          cask "meeting-notes" do
+            arch arm: "arm64", intel: "intel"
+            version "${VERSION}"
+            sha256 arm: "${ARM_SHA}", intel: "${INTEL_SHA}"
+
+            url "https://github.com/f71uday/meeting-notes/releases/download/v#{version}/Meeting-Notes-#{version}-#{arch}.dmg"
+            name "Meeting Notes"
+            desc "Local-first AI meeting assistant for macOS"
+            homepage "https://github.com/f71uday/meeting-notes"
+
+            depends_on macos: :sequoia
+
+            app "Meeting Notes.app"
+
+            caveats "Grant Screen Recording and Microphone access in System Settings before recording."
+          end
+          EOF
+
+          cd homebrew-tap
+          ruby -c Casks/meeting-notes.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/meeting-notes.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Meeting Notes cask to ${VERSION}"
+            git push origin main
+          fi
+
+      - name: Explain skipped Homebrew update
+        if: steps.homebrew-ready.outputs.ready != 'true'
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          The GitHub release was published, but the Homebrew tap was not updated.
+
+          Configure `HOMEBREW_TAP_TOKEN` (fine-grained token with Contents: read and write access to `f71uday/homebrew-meeting-notes`) and the Apple signing/notarization secrets listed in the repository README, then publish the next version tag.
+          EOF
